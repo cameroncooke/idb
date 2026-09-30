@@ -59,14 +59,14 @@ public final class FBSimulatorHID: CustomStringConvertible, @unchecked Sendable 
    */
   public convenience init(
     for simulator: FBSimulator, transport transportType: FBSimulatorHIDTransportType? = nil
-  ) throws {
+  ) async throws {
     let resolvedTransportType = transportType ?? simulator.defaultHIDTransport
     let transport: FBSimulatorHIDTransport
     switch resolvedTransportType {
     case .indigo:
       transport = try FBSimulatorIndigoHIDTransport.indigo(for: simulator)
     case .dtuhid:
-      transport = try FBSimulatorDTUHIDTransport.dtuhid(for: simulator)
+      transport = try await FBSimulatorDTUHIDTransport.dtuhid(for: simulator)
     }
     self.init(transport: transport, transportType: resolvedTransportType, purple: FBSimulatorPurpleHID(), simulator: simulator)
   }

@@ -79,9 +79,8 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
 
   // MARK: Initializers
 
-  /// Builds a DTUHID transport for the provided Simulator, establishing the host XPC connection to
-  /// `dtuhidd`. All setup is synchronous, so the returned transport is ready to send.
-  static func dtuhid(for simulator: FBSimulator) throws -> FBSimulatorDTUHIDTransport {
+  /// Builds a DTUHID transport for the provided Simulator, ready to carry caller events.
+  static func dtuhid(for simulator: FBSimulator) async throws -> FBSimulatorDTUHIDTransport {
     guard let handle = dlopen(nil, RTLD_NOW) else {
       throw FBSimulatorHIDError.dtuhidXPCSymbolsUnavailable
     }
@@ -111,10 +110,17 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
     xpc_connection_set_event_handler(connection) { _ in }
     xpc_connection_resume(connection)
 
-    return FBSimulatorDTUHIDTransport(
+    let transport = FBSimulatorDTUHIDTransport(
       connection: connection,
       mainScreenSize: simulator.device.deviceType.mainScreenSize,
       mainScreenScale: simulator.device.deviceType.mainScreenScale)
+    do {
+      try await transport.primeThenWait()
+    } catch {
+      transport.disconnect()
+      throw error
+    }
+    return transport
   }
 
   init(connection: xpc_connection_t, mainScreenSize: CGSize, mainScreenScale: Float) {
@@ -187,7 +193,21 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   /// The actor serializes calls, so per-gesture state stays consistent. Does not wait for the daemon
   /// to consume the event — that is `flush()`'s job, run once per gesture rather than per primitive.
   func send(messageType: String, payload: some Encodable) async throws {
-    let object = try encode(messageType: messageType, payload: payload)
+    try await deliver(encode(messageType: messageType, payload: payload))
+  }
+
+  /// XPC creates the peer on its first message, before `dtuhidd` has an active service. Spend that
+  /// message on HID usage zero, which indicates no key event, then allow service activation.
+  /// Activation exceeded 1.4s in fresh-simulator tests; two seconds provides margin in the absence
+  /// of a readiness acknowledgement from the daemon.
+  private func primeThenWait() async throws {
+    try await deliver(encode(
+      messageType: "IndigoKeyboardButtonEvent",
+      payload: IndigoKeyboardButtonEvent(usageCode: 0, state: .up)))
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+  }
+
+  private func deliver(_ object: xpc_object_t) async throws {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       xpc_connection_send_message(connection, object)
       xpc_connection_send_barrier(connection) {
